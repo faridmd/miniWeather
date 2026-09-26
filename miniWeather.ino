@@ -1,4 +1,3 @@
-#include <EEPROM.h>
 #include <NTPClient.h>
 #include<ESP8266WiFi.h>
 #include<ESP8266HTTPClient.h>
@@ -7,29 +6,9 @@
 #include<Adafruit_GFX.h>
 #include<SPI.h>
 #include <WiFiUdp.h>
-
-// DHT11
-#include "DHT.h"
-#define DHTPIN 14
-#define DHTTYPE DHT11
-DHT dht(DHTPIN, DHTTYPE);
-
-// ====== PIN RELAY (WEMOS D1 MINI) ======
-#define RELAY1_PIN 12  // D6
-#define RELAY2_PIN 13  // D7
-bool l1, l2;
-
-// Firecrit
-#include <ESP8266WiFi.h>
-#include <Firebase_ESP_Client.h>
-#include <addons/TokenHelper.h>
-#include <addons/RTDBHelper.h>
-#define API_KEY "AIzaSyD3Hm_jBGcJprSaGvHeidb0GcvVQgxL4Qc"
-#define DATABASE_URL "serverku-93c3c-default-rtdb.asia-southeast1.firebasedatabase.app"
-
-FirebaseData fbdo;
-FirebaseAuth auth;
-FirebaseConfig config;
+#include "logo.h"
+#include <WiFiManager.h>
+#include <ArduinoOTA.h>
 
 // DAY
 // Patchy rain nearby
@@ -105,58 +84,84 @@ const unsigned char night_partlyCloudy [] PROGMEM = {
 	0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff
 };
 
-String api_key = "f5aa3060be2541ccbbd31fc145ee5873";  // Enter your API key
-const char* ssid = "OpenWrt";      // Enter your SSID
-const char* pass = "123456789";               // Enter Password
 
-String url = "http://api.weatherapi.com/v1/current.json?key=3e09e90ff85e4e9caac164047250707&q=Yogyakarta&aqi=no";        
+extern const unsigned char thunderstorm_rain[];
+extern const unsigned char cloudy[];
+extern const unsigned char drizzle[];
+extern const unsigned char mist[];
+extern const unsigned char rain[];
+extern const unsigned char sleet[];
+extern const unsigned char snow[];
+extern const unsigned char thunderstrom_drizzle[];
+extern const unsigned char unknown_prep[];
+
+struct IconDef {
+  const unsigned char* bitmap;
+  int w;
+  int h;
+};
+
+IconDef all_icons[] = {
+  {day_176, 57, 54},
+  {night_partlyCloudy, 57, 54},
+  {thunderstorm_rain, 60, 57},
+  {cloudy, 60, 53},
+  {drizzle, 59, 55},
+  {mist, 59, 54},
+  {rain, 59, 55},
+  {sleet, 60, 54},
+  {snow, 57, 58},
+  {thunderstrom_drizzle, 59, 55},
+  {unknown_prep, 59, 54}
+};
+
+String url = "https://api.ryzumi.net/api/search/weather?city=tulungagung";
+String url_sholat = "https://api.ryzumi.net/api/search/jadwal-sholat?kota=tulungagung";        
 
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
 
-// NTP server: pool.ntp.org, UTC offset for WIB = 7 * 3600 = 25200
 WiFiUDP ntpUDP;
-NTPClient timeClient(ntpUDP, "pool.ntp.org", 25200);  // 25200 detik = 7 jam
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 25200);
 
 int lastMinute = -1;
+unsigned long lastCheckTime = 0;
+const unsigned long interval = 5000;
 
-unsigned long lastCheckTime = 0;     // waktu terakhir pengecekan
-const unsigned long interval = 5000; // interval pengecekan dalam ms (5 detik)
+String disp_hourStr = "00";
+String disp_minStr = "00";
+float disp_temp = 0.0;
+float disp_feels = 0.0;
+String marquee_text = "Menghubungkan...";
+String public_ip = "Loading..";
+int scrollX = 128;
+int current_icon_index = 0;
+unsigned long lastScrollTime = 0;
 
-const int tahunSekarang = 2025;
-
+String payload;
+WiFiClientSecure client;
 
 void setup() {
-  EEPROM.begin(512);  // Alokasikan 512 byte EEPROM
-
-  // Displays all the weather icons 
   Serial.begin(9600);
   display.begin(SSD1306_SWITCHCAPVCC, 0x3C);  
   delay(300);
-
-  pinMode(RELAY1_PIN, OUTPUT);
-  pinMode(RELAY2_PIN, OUTPUT);
-  
-  // Ambil kondisi terakhir dari EEPROM
-  l1 = EEPROM.read(0);  // alamat 0 untuk l1
-  l2 = EEPROM.read(1);  // alamat 1 untuk l2
-
-  // Terapkan kondisi terakhir ke relay (aktif LOW)
-  digitalWrite(RELAY1_PIN, l1 ? LOW : HIGH);
-  digitalWrite(RELAY2_PIN, l2 ? LOW : HIGH);
-
+  display.setRotation(2);
   display.clearDisplay();
   display.setTextColor(WHITE);
-  display.setCursor(0, 0);
-  display.setTextSize(2);
-  display.println("OLED");
-  display.println("WEATHER");
-  display.println("MONITORING");
+  display.setTextWrap(false);
+  // Menggambar array Vertikal secara manual (pixel-by-pixel)
+  for (int16_t y = 0; y < 64; y++) {
+    for (int16_t x = 0; x < 128; x++) {
+      int page = y / 8;
+      int byte_idx = page * 128 + x;
+      uint8_t pixel_byte = pgm_read_byte(&display_image[byte_idx]);
+      if (pixel_byte & (1 << (y % 8))) {
+        display.drawPixel(x, y, WHITE);
+      }
+    }
+  }
   display.display();
-  // delay(1000);
-  display.invertDisplay(1);
-  // delay(500);
-
-  // displays ssid of the router to be connected
+  delay(2000); // Tahan logo selama 2 detik
+  
   display.invertDisplay(0);
   display.clearDisplay();
   display.setCursor(0, 0);
@@ -166,13 +171,32 @@ void setup() {
   display.setCursor(52, 16);
   display.println("TO");
   display.setTextSize(1);
-  display.println(ssid);
+  String saved_ssid = WiFi.SSID();
+  if (saved_ssid == "") saved_ssid = "Saved WiFi";
+  display.println(saved_ssid);
   display.display();
-  WiFi.begin(ssid, pass);
-  while (WiFi.status() != WL_CONNECTED)   // wait for connection
-  {
-    Serial.print(".");
-    delay(500);
+
+  WiFiManager wifiManager;
+  
+  // Callback jika tidak ada WiFi yang tersimpan atau gagal konek
+  wifiManager.setAPCallback([](WiFiManager *myWiFiManager) {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.setTextSize(1);
+    display.println("WIFI SETUP MODE");
+    display.println("");
+    display.println("Konek ke Hotspot:");
+    display.println(myWiFiManager->getConfigPortalSSID());
+    display.println("Buka di Browser:");
+    display.println("192.168.4.1");
+    display.display();
+  });
+
+  // Coba konek ke WiFi yang tersimpan, jika gagal buat Hotspot "Wemos_Cuaca"
+  if (!wifiManager.autoConnect("Wemos_Cuaca")) {
+    Serial.println("Gagal koneksi dan timeout");
+    ESP.restart();
+    delay(1000);
   }
   display.setCursor(0, 48);
   display.setTextSize(2);
@@ -182,110 +206,120 @@ void setup() {
   delay(500);
   display.clearDisplay();
   display.setTextColor(WHITE);
-
-  // Firecrit
-  config.api_key = API_KEY;
-  config.database_url = DATABASE_URL;
-  config.signer.test_mode = true;
-  config.token_status_callback = tokenStatusCallback;
-
-  Firebase.reconnectNetwork(true);
-  fbdo.setBSSLBufferSize(4096, 1024);
-  fbdo.setResponseSize(2048);
-  config.timeout.serverResponse = 10000;
-
-  Firebase.begin(&config, &auth);
-  Firebase.setDoubleDigits(2);
-
   timeClient.begin();
-  dht.begin();
+  client.setInsecure();
+
+  // Set up OTA
+  ArduinoOTA.setHostname("Wemos-Cuaca");
+  ArduinoOTA.onStart([]() {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.setTextSize(1);
+    display.println("OTA Memulai...");
+    display.display();
+  });
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.setTextSize(1);
+    display.println("OTA Update:");
+    display.print(progress / (total / 100));
+    display.println("%");
+    display.display();
+  });
+  ArduinoOTA.onEnd([]() {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.setTextSize(1);
+    display.println("OTA Selesai!");
+    display.println("Restarting...");
+    display.display();
+  });
+  ArduinoOTA.begin();
 }
 
-String payload;
-WiFiClient client;
 void loop() {
+  ArduinoOTA.handle();
   unsigned long now = millis();
-  // cek setiap 5 detik (atau sesukamu)
+
+  if (now - lastScrollTime >= 30) {
+    lastScrollTime = now;
+    scrollX--;
+    int textWidth = marquee_text.length() * 6;
+    if (scrollX < -textWidth) {
+      scrollX = 128;
+    }
+    draw_screen();
+  }
+
   if (now - lastCheckTime >= interval) {
     lastCheckTime = now;
     set_weather();
-    set_relay();
   }
 }
 
-void set_relay(){
-  FirebaseJsonData result;
+void draw_screen() {
+  display.clearDisplay();
+  
+  // Jam
+  display.setCursor(62, 0);
+  display.setTextSize(2);
+  display.println(disp_hourStr + ":" + disp_minStr);
+  
+  // Kota
+  display.setTextSize(1);
+  display.setCursor(62, 20);
+  display.print("Tulungagung");
+  display.drawLine(62, 28, 127, 28, WHITE);
 
-  if (Firebase.RTDB.getJSON(&fbdo, "/condition")) {
-    FirebaseJson json = fbdo.jsonObject();
-
-    bool l1 = false, l2 = false;
-
-    if (json.get(result, "l1")) {
-      l1 = result.to<bool>();
+  // Ikon & Suhu
+  display.setCursor(62, 32);
+  display.setTextSize(2);
+  display.print(disp_temp, 1); 
+  display.print((char)247); // Simbol derajat
+  display.setTextSize(1);
+  display.print("C"); // Huruf C berukuran kecil agar pas di ujung layar 
+  
+  // SSID & IP (Ganti FL) dengan animasi Ping-Pong jika panjang
+  display.setTextSize(1);
+  String current_text = ((millis() / 4000) % 2 == 0) ? WiFi.SSID() : public_ip;
+  int textWidth = current_text.length() * 6;
+  int x = 62;
+  
+  if (textWidth > 66) { // 66 adalah ruang piksel yang tersedia (128 - 62)
+    int max_offset = textWidth - 66;
+    int cycle = max_offset * 100; // 50ms per piksel x 2 (bolak-balik)
+    int t = millis() % cycle;
+    int offset = t / 50;
+    if (offset > max_offset) {
+      offset = (max_offset * 2) - offset;
     }
-
-    if (json.get(result, "l2")) {
-      l2 = result.to<bool>();
-    }
-
-    Serial.printf("l1 = %s, l2 = %s\n", l1 ? "true" : "false", l2 ? "true" : "false");
-
-    digitalWrite(RELAY1_PIN, l1 ? LOW : HIGH);
-    digitalWrite(RELAY2_PIN, l2 ? LOW : HIGH);
-
-    // SIMPAN ke EEPROM
-    EEPROM.write(0, l1);
-    EEPROM.write(1, l2);
-    EEPROM.commit();
-
-    Serial.printf("Status tersimpan: l1=%s, l2=%s\n", l1 ? "ON" : "OFF", l2 ? "ON" : "OFF");
-  } else {
-    Serial.printf("Gagal ambil data: %s\n", fbdo.errorReason().c_str());
+    x = 62 - offset;
   }
+  display.setCursor(x, 48);
+  display.print(current_text);
+
+  // Marquee (Software Scroll)
+  display.setTextSize(1);
+  display.setCursor(scrollX, 56);
+  display.print(marquee_text);
+
+  // Menggambar ikon terakhir sebagai penutup (clipping mask) teks yang overlap
+  display.drawBitmap(0, 0, all_icons[current_icon_index].bitmap, all_icons[current_icon_index].w, all_icons[current_icon_index].h, BLACK, WHITE);
+  display.display();
 }
 
 void set_weather(){
   timeClient.update();
-  // Ambil jam dan menit sebagai integer
   int hours = timeClient.getHours();
   int minutes = timeClient.getMinutes();
 
-  // Get Date
-  time_t epochTime = timeClient.getEpochTime();
-  struct tm *ptm = gmtime ((time_t *)&epochTime); 
-  int monthDay = ptm->tm_mday;
-  int currentMonth = ptm->tm_mon+1;
-  int currentYear = ptm->tm_year+1900;
-  Serial.println(String(epochTime) + " | " + String(currentYear));
-
-  // Lanjut, ambil nilai DHT
-  float suhu, kelembapan;
-  getDHT(suhu, kelembapan);
-
-  if (currentYear == tahunSekarang){
-    FirebaseJson json;
-    json.set("suhu", suhu);
-    json.set("kelembaban", kelembapan);
-    json.set("timestamp", epochTime);
-
-    if (Firebase.RTDB.setJSON(&fbdo, "/sensor", &json)) {
-      Serial.println("Data berhasil dikirim ke Firebase");
-    } else {
-      Serial.printf("Gagal kirim: %s\n", fbdo.errorReason().c_str());
-    }
-  }
-
-  // keluar kalau menitnya sama
   if (minutes == lastMinute) {
     return;
   }
   
-  // Set nilai terakhir
   lastMinute = minutes;
-  display.stopscroll();
 
-  // Ubah ke string dua digit (misalnya 08:05)
   String hourStr = (hours < 10 ? "0" : "") + String(hours);
   String minuteStr = (minutes < 10 ? "0" : "") + String(minutes);
 
@@ -293,89 +327,84 @@ void set_weather(){
   http.begin(client, url);
   int httpcode = http.GET();
 
-  // Ulangi terus sampai dapat response OK
   while (httpcode != 200) {
     Serial.println("GETTING DATA...");
-
-    display.clearDisplay();
-    display.setTextSize(1);
-    display.setCursor(0, 32);
-    display.println("Please Wait.....");
-    display.println("");
-    display.print("Fetching Data");
-    display.display();
-
-    delay(1000); // beri jeda sebentar sebelum coba lagi
-
-    http.end(); // tutup koneksi lama
-    http.begin(client, url); // mulai koneksi baru
-    httpcode = http.GET(); // coba lagi
+    delay(1000);
+    http.end();
+    http.begin(client, url);
+    httpcode = http.GET();
   }
 
-  display.clearDisplay();
-  // Parsing
   String payload = http.getString();
 
-  const size_t bufferSize = 
-    JSON_OBJECT_SIZE(2) +    // location + current
-    JSON_OBJECT_SIZE(25) +   // current detail
-    JSON_OBJECT_SIZE(3) +    // condition
-    500;
+  JsonDocument doc;
+  DeserializationError error = deserializeJson(doc, payload);
 
-  DynamicJsonBuffer jsonBuffer(bufferSize);
-  JsonObject& root = jsonBuffer.parseObject(payload);
-
-  if (!root.success()) {
-    Serial.println("JSON parsing failed");
+  if (error) {
+    Serial.print("JSON parsing failed: ");
+    Serial.println(error.c_str());
+    http.end();
     return;
   }
 
-  // Akses objek dan ambil data
-  JsonObject& location = root["location"];
-  JsonObject& current = root["current"];
-  JsonObject& condition = current["condition"];
+  JsonObject main = doc["main"];
+  JsonObject weather_0 = doc["weather"][0];
 
-  const char* city_name = location["name"];
-  float curr_temp = current["temp_c"];
-  float app_temp = current["feelslike_c"];
-  float wind_spd = current["wind_kph"];
-  const char* wind_cdir = current["wind_dir"];
-  const char* desc = condition["text"];
-  int code = condition["code"]; // misalnya 1030 = Mist
+  const char* city_name = doc["name"];
+  float curr_temp = main["temp"];
+  float app_temp = main["feels_like"];
+  float wind_spd = doc["wind"]["speed"];
+  int kelembapan = main["humidity"];
+  const char* desc = weather_0["description"];
+  const char* icon_code = weather_0["icon"];
 
-  // Tampilkan di serial
-  Serial.print("----------------"); Serial.println(city_name);
-  Serial.print("City: "); Serial.println(city_name);
-  Serial.print("Temp: "); Serial.println(curr_temp);
-  Serial.print("Feels Like: "); Serial.println(app_temp);
-  Serial.print("Wind: "); Serial.print(wind_spd); Serial.print(" km/h "); Serial.println(wind_cdir);
-  Serial.print("Condition: "); Serial.println(desc);
-  Serial.print("Code: "); Serial.println(code);
-  Serial.print("Suhu Ruang: "); Serial.println(suhu);
-  Serial.print("Kelembapan Ruang: "); Serial.println(kelembapan);
+  http.end();
 
-  display.setCursor(62, 0);
-  display.setTextSize(2);
-  display.println(hourStr + ":" + minuteStr);
-  display.setTextSize(1);
-  display.setCursor(62, 20);
-  display.print(city_name);   // Prints city name ie: Marmagao in my case
-  display.drawLine(62, 28, 127, 28, WHITE);
+  // Mapping Ikon Berdasarkan Kode OpenWeather
+  String icon_str = String(icon_code);
+  if (icon_str == "01d" || icon_str == "02d") current_icon_index = 0; // day_176
+  else if (icon_str == "01n" || icon_str == "02n") current_icon_index = 1; // night_partlyCloudy
+  else if (icon_str == "03d" || icon_str == "03n" || icon_str == "04d" || icon_str == "04n") current_icon_index = 3; // cloudy
+  else if (icon_str == "09d" || icon_str == "09n") current_icon_index = 4; // drizzle
+  else if (icon_str == "10d" || icon_str == "10n") current_icon_index = 6; // rain
+  else if (icon_str == "11d" || icon_str == "11n") current_icon_index = 2; // thunderstorm_rain
+  else if (icon_str == "13d" || icon_str == "13n") current_icon_index = 8; // snow
+  else if (icon_str == "50d" || icon_str == "50n") current_icon_index = 5; // mist
+  else current_icon_index = 10; // unknown_prep
 
-  display.drawBitmap(0, 0, day_176, 57, 54, BLACK, WHITE);
-  display.setCursor(62, 32);
-  display.setTextSize(2);
-  display.print(app_temp);
+  
+  http.begin(client, url_sholat);
+  httpcode = http.GET();
+  String sholat_str = "";
+  if (httpcode == 200) {
+    String payload_sholat = http.getString();
+    JsonDocument doc_sholat;
+    if (!deserializeJson(doc_sholat, payload_sholat)) {
+      JsonObject jadwal = doc_sholat["schedules"][0]["jadwal"];
+      const char* subuh = jadwal["subuh"];
+      const char* dzuhur = jadwal["dzuhur"];
+      const char* ashar = jadwal["ashar"];
+      const char* maghrib = jadwal["maghrib"];
+      const char* isya = jadwal["isya"];
+      sholat_str = " | Subuh: " + String(subuh) + " Dzuhur: " + String(dzuhur) + " Ashar: " + String(ashar) + " Maghrib: " + String(maghrib) + " Isya: " + String(isya);
+    }
+  }
+  http.end();
 
-  display.setTextSize(1);
-  display.setCursor(62, 48);
-  display.print(String(suhu,1) + "C  ");
-  display.println(String(int(kelembapan)) + "%");
+  // Fetch Public IP
+  http.begin(client, "https://ifconfig.me/ip");
+  httpcode = http.GET();
+  if (httpcode == 200) {
+    public_ip = http.getString();
+  } else if (public_ip == "Loading..") {
+    public_ip = WiFi.localIP().toString(); // Fallback ke local IP jika gagal
+  }
+  http.end();
 
-  display.setCursor(0, 56); // Y=48 agar aman di page 6
-  // display.print(String(desc) + " | " + String(wind_spd) + "m/s " + String(wind_cdir));
-  display.print(desc);
-
-  display.display();
-  display.startscrollleft(0x07, 0x07); // scroll page 6   
+  // Assign to global variables for drawing
+  disp_hourStr = hourStr;
+  disp_minStr = minuteStr;
+  disp_temp = curr_temp;
+  disp_feels = app_temp;
+  marquee_text = String(desc) + " " + String(kelembapan) + "%" + sholat_str;
 }
