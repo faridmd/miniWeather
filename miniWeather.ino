@@ -178,6 +178,9 @@ void setup() {
 
   WiFiManager wifiManager;
   
+  // Set timeout koneksi ke WiFi lama menjadi 2 menit (120 detik)
+  wifiManager.setConnectTimeout(120);
+  
   // Callback jika tidak ada WiFi yang tersimpan atau gagal konek
   wifiManager.setAPCallback([](WiFiManager *myWiFiManager) {
     display.clearDisplay();
